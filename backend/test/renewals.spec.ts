@@ -7,6 +7,7 @@ import * as bcrypt from 'bcrypt';
 import { AppModule } from '../src/app.module';
 import { HttpExceptionFilter } from '../src/common/filters/http-exception.filter';
 import { createFakeProvider, FakeProvider } from './fake-provider';
+import { WorkerService } from '../src/worker/worker.service';
 
 jest.setTimeout(30000);
 
@@ -179,6 +180,43 @@ describe('Create renewal request', () => {
   });
 });
 
+// ---- Date arithmetic — timezone invariant ----
+describe('date arithmetic timezone invariant', () => {
+  it('newDate is 2027-03-31 when TZ=America/Los_Angeles', async () => {
+    const savedTZ = process.env.TZ;
+    process.env.TZ = 'America/Los_Angeles';
+    try {
+      const token = await getToken('initiator-alpha');
+      const res = await request(app.getHttpServer())
+        .post('/renewal-requests')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ resourceId: 'res-a-01' });
+      expect(res.status).toBe(201);
+      expect(res.body.newDate).toBe('2027-03-31');
+    } finally {
+      if (savedTZ !== undefined) process.env.TZ = savedTZ;
+      else delete process.env.TZ;
+    }
+  });
+
+  it('newDate is 2027-03-31 when TZ=Asia/Tokyo', async () => {
+    const savedTZ = process.env.TZ;
+    process.env.TZ = 'Asia/Tokyo';
+    try {
+      const token = await getToken('initiator-alpha');
+      const res = await request(app.getHttpServer())
+        .post('/renewal-requests')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ resourceId: 'res-a-01' });
+      expect(res.status).toBe(201);
+      expect(res.body.newDate).toBe('2027-03-31');
+    } finally {
+      if (savedTZ !== undefined) process.env.TZ = savedTZ;
+      else delete process.env.TZ;
+    }
+  });
+});
+
 // ---- Approve / Reject ----
 describe('Approve & Reject', () => {
   let requestId: string;
@@ -316,9 +354,10 @@ describe('Worker & Provider', () => {
     expect(res.expiryDate).toBe('2027-03-31');
   });
 
-  it('resource expiry updated exactly once on repeated processing', async () => {
+  it('resource expiry updated exactly once on repeated processing (direct completeJob + concurrent)', async () => {
     const initiatorToken = await getToken('initiator-alpha');
     const approverToken = await getToken('approver-alpha');
+    const workerService = app.get(WorkerService);
 
     const created = await request(app.getHttpServer())
       .post('/renewal-requests')
@@ -330,6 +369,7 @@ describe('Worker & Provider', () => {
       .post(`/renewal-requests/${requestId}/approve`)
       .set('Authorization', `Bearer ${approverToken}`);
 
+    // Bring to COMPLETED via normal flow
     await waitFor(async () => {
       const r = await request(app.getHttpServer())
         .get('/renewal-requests')
@@ -337,26 +377,50 @@ describe('Worker & Provider', () => {
       return r.body.find((x: any) => x.id === requestId)?.status === 'COMPLETED';
     }, 15000);
 
-    // expiryDate must equal the snapshot stored at creation time (2027-03-01 + 30d = 2027-03-31)
     const resourcesRes = await request(app.getHttpServer())
       .get('/resources')
       .set('Authorization', `Bearer ${initiatorToken}`);
     const res = resourcesRes.body.find((r: any) => r.id === 'res-a-01');
     expect(res.expiryDate).toBe('2027-03-31');
 
-    // Idempotency guard: the WHERE status='PROCESSING' condition must not match a COMPLETED request
-    const [{ matched }] = await ds.query(
-      `SELECT COUNT(*)::int AS matched FROM renewal_requests WHERE id = $1 AND status = 'PROCESSING'`,
+    // Fetch the outbox job (now DONE) to replay completeJob directly
+    const [job] = await ds.query(
+      `SELECT id, request_id FROM outbox_jobs WHERE request_id = $1`,
       [requestId],
     );
-    expect(matched).toBe(0); // 0 rows would be touched → resource not updated a second time
+    const fakeResult = { operation_id: 'op-duplicate-test', status: 'completed' };
 
-    // expiryDate must still be '2027-03-31' — not shifted again
+    // Call completeJob directly on an already-COMPLETED request — should be a no-op
+    await (workerService as any).completeJob(job, fakeResult);
+
+    // Call twice concurrently — both should be no-ops
+    await Promise.all([
+      (workerService as any).completeJob(job, fakeResult),
+      (workerService as any).completeJob(job, fakeResult),
+    ]);
+
+    // Resource must still be 2027-03-31 — not shifted again
     const resourcesRes2 = await request(app.getHttpServer())
       .get('/resources')
       .set('Authorization', `Bearer ${initiatorToken}`);
     const res2 = resourcesRes2.body.find((r: any) => r.id === 'res-a-01');
     expect(res2.expiryDate).toBe('2027-03-31');
+
+    // History must have exactly one PROCESSING → COMPLETED transition
+    const history = await ds.query(
+      `SELECT from_status, to_status FROM request_history WHERE request_id = $1 ORDER BY created_at`,
+      [requestId],
+    );
+    const completedEntries = history.filter(
+      (h: any) => h.from_status === 'PROCESSING' && h.to_status === 'COMPLETED',
+    );
+    expect(completedEntries).toHaveLength(1);
+
+    // Backend operation_count must be exactly 1
+    const statsRes = await request(app.getHttpServer())
+      .get(`/stats?resource_id=res-a-01`)
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    expect(statsRes.body.operation_count).toBe(1);
   });
 
   it('3 POST failures → NEEDS_ATTENTION', async () => {

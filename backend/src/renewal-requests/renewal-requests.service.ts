@@ -58,9 +58,8 @@ export class RenewalRequestsService {
     }
 
     const oldDate = toDateStr(resource.expiryDate);
-    const d = new Date(oldDate);
-    d.setDate(d.getDate() + 30);
-    const newDate = d.toISOString().substring(0, 10);
+    const [y, m, day] = oldDate.split('-').map(Number);
+    const newDate = new Date(Date.UTC(y, m - 1, day + 30)).toISOString().substring(0, 10);
 
     const idempotencyKey = uuidv4();
 

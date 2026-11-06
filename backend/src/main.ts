@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { types } from 'pg';
+types.setTypeParser(1082, (val: string) => val); // DATE → plain 'YYYY-MM-DD' string
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
