@@ -62,6 +62,8 @@ async function cleanDb(ds: DataSource) {
   await ds.query(`UPDATE resources SET expiry_date='2027-03-01' WHERE id='res-a-01'`);
   await ds.query(`UPDATE resources SET expiry_date='2027-05-20' WHERE id='res-a-02'`);
   await ds.query(`UPDATE resources SET expiry_date='2027-06-01' WHERE id='res-b-01'`);
+  // Remove any resources seeded by e2e tests (e.g. res-e2e-01) that may linger in the test DB
+  await ds.query(`DELETE FROM resources WHERE id NOT IN ('res-a-01', 'res-a-02', 'res-b-01')`);
 }
 
 beforeAll(async () => {
@@ -335,22 +337,26 @@ describe('Worker & Provider', () => {
       return r.body.find((x: any) => x.id === requestId)?.status === 'COMPLETED';
     }, 15000);
 
-    // Simulate duplicate completeJob call (manual test of idempotency)
-    // Job is already DONE, so a second UPDATE to renewal_requests won't match (status != PROCESSING)
-    const beforeResources = await ds.query(
-      `SELECT expiry_date FROM resources WHERE id = 'res-a-01'`,
-    );
-    // Try running completeJob logic manually — it should not shift the date again
-    const result = await ds.query(
-      `UPDATE renewal_requests SET status = 'COMPLETED' WHERE id = $1 AND status = 'PROCESSING' RETURNING id`,
+    // expiryDate must equal the snapshot stored at creation time (2027-03-01 + 30d = 2027-03-31)
+    const resourcesRes = await request(app.getHttpServer())
+      .get('/resources')
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    const res = resourcesRes.body.find((r: any) => r.id === 'res-a-01');
+    expect(res.expiryDate).toBe('2027-03-31');
+
+    // Idempotency guard: the WHERE status='PROCESSING' condition must not match a COMPLETED request
+    const [{ matched }] = await ds.query(
+      `SELECT COUNT(*)::int AS matched FROM renewal_requests WHERE id = $1 AND status = 'PROCESSING'`,
       [requestId],
     );
-    expect(result[0].length).toBe(0); // no rows updated → date not shifted again
+    expect(matched).toBe(0); // 0 rows would be touched → resource not updated a second time
 
-    const afterResources = await ds.query(
-      `SELECT expiry_date FROM resources WHERE id = 'res-a-01'`,
-    );
-    expect(beforeResources[0].expiry_date).toEqual(afterResources[0].expiry_date);
+    // expiryDate must still be '2027-03-31' — not shifted again
+    const resourcesRes2 = await request(app.getHttpServer())
+      .get('/resources')
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    const res2 = resourcesRes2.body.find((r: any) => r.id === 'res-a-01');
+    expect(res2.expiryDate).toBe('2027-03-31');
   });
 
   it('3 POST failures → NEEDS_ATTENTION', async () => {

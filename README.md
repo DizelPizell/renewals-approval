@@ -175,20 +175,33 @@ curl -s http://localhost:3000/stats?resource_id=res-b-01 -H "Authorization: Bear
 ### Результат контрольного прогона (06.11.2026)
 
 ```
-approve → PROCESSING
+Pre-flight: DB сброшен — res-a-01 expiryDate = 2027-03-01
+
+GET /resources → res-a-01 expiryDate: 2027-03-01   ← BEFORE
+
+POST /renewal-requests → oldDate=2027-03-01, newDate=2027-03-31 (snapshot)
+POST /approve          → PROCESSING
+
 t+7s:   KILL backend
         outbox_job: status=PENDING, attempt_count=1,
                     next_attempt_at ≈ approve_time+15s, lease_until=NULL
-restart → worker ждёт next_attempt_at → GET /renewals/{key}
-t+2s:   COMPLETED  (started_count=1 у симулятора — повторного POST не было)
 
-GET /renewals/a78c60a4-ced8-4544-8a16-439ca17ceb95:
-  {"operation_id":"7b8c2a75-...","status":"completed","started_count":1,"resource_id":"res-a-01"}
+restart → worker ждёт next_attempt_at → GET /renewals/{key} → {status:"completed"}
+t+2s:   COMPLETED  (started_count=1 — повторного POST не было)
 
-GET /stats?resource_id=res-a-01  → {"operation_count":1}
-GET /stats?resource_id=res-b-01  → {"operation_count":0}
-res-a-01 expiryDate: 2027-04-30  (обновлён с 2027-03-31)
+GET /resources → res-a-01 expiryDate: 2027-03-31   ← AFTER ✓
+
+GET /renewal-requests/:id/history:
+  null→PENDING (create) → PENDING→PROCESSING (approve) → PROCESSING→COMPLETED (worker)
+
+GET /renewals/{key} (simulator):
+  {"status":"completed","started_count":1,"resource_id":"res-a-01"}
+
+GET /stats?resource_id=res-a-01 (backend) → {"operation_count":1}
+GET /stats?resource_id=res-b-01 (backend) → {"operation_count":0}
 ```
+
+Прежнее значение 2027-04-30 было ошибкой грязной БД (psql не нашёлся в PATH и reset-команда молча провалилась). Логика корректна: `expiryDate` берётся из снимка `new_date` заявки, который создаётся при POST /renewal-requests из `oldDate + 30 дней`.
 
 ---
 

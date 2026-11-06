@@ -112,6 +112,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (ds) {
+    // Remove e2e-specific test data from renewals_test (never touches dev 'renewals' DB)
+    await ds.query(`DELETE FROM outbox_jobs WHERE resource_id = 'res-e2e-01'`);
+    await ds.query(
+      `DELETE FROM request_history WHERE request_id IN
+       (SELECT id FROM renewal_requests WHERE resource_id='res-e2e-01')`,
+    );
+    await ds.query(`DELETE FROM renewal_requests WHERE resource_id = 'res-e2e-01'`);
+    await ds.query(`DELETE FROM resources WHERE id = 'res-e2e-01'`);
+    await ds.query(
+      `DELETE FROM users WHERE username IN ('e2e-initiator', 'e2e-approver')`,
+    );
+  }
   await app?.close();
 });
 
@@ -120,6 +133,12 @@ beforeEach(async () => {
 });
 
 describe('E2E against real provider simulator', () => {
+  it('uses renewals_test DB, not the dev DB', () => {
+    // setup.ts loads .env.test which sets DB_NAME=renewals_test before any test runs.
+    // This test makes it explicit so a misconfigured environment fails fast.
+    expect(process.env.DB_NAME).toBe('renewals_test');
+  });
+
   it('simulator health check passes', async () => {
     const available = await checkSimulatorAvailable();
     if (!available) {
