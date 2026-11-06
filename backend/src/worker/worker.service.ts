@@ -83,11 +83,16 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private async processJob(job: any) {
     const retryDelay = parseInt(this.config.get('PROVIDER_RETRY_DELAY_MS', '5000'));
 
-    // Check GET first if we had previous failed POSTs
+    // If previous POSTs failed, check GET first before retrying
     if (job.attempt_count > 0) {
       const got = await this.safeGet(job.idempotency_key);
       if (got?.status === 'completed') {
         await this.completeJob(job, got);
+        return;
+      }
+      // All 3 POSTs done and provider still has nothing → give up
+      if (job.attempt_count >= 3) {
+        await this.failJob(job.id, job.request_id, job.attempt_count);
         return;
       }
     }
@@ -99,35 +104,20 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // POST failed — persist attempt count immediately (crash-safe)
+    // POST returned 503 — release back to PENDING with future next_attempt_at.
+    // No blocking sleep: the DB timestamp drives when the next pick-up happens.
     const attempts = job.attempt_count + 1;
     await this.dataSource.query(
-      `UPDATE outbox_jobs SET attempt_count = $1, updated_at = NOW() WHERE id = $2`,
-      [attempts, job.id],
+      `UPDATE outbox_jobs
+       SET status = 'PENDING',
+           attempt_count = $1,
+           next_attempt_at = NOW() + make_interval(secs => $2 / 1000.0),
+           lease_until = NULL,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [attempts, retryDelay, job.id],
     );
-
-    // Wait and check GET
-    await this.sleep(retryDelay);
-
-    const got = await this.safeGet(job.idempotency_key);
-    if (got?.status === 'completed') {
-      await this.completeJob(job, got);
-      return;
-    }
-
-    if (attempts >= 3) {
-      await this.failJob(job.id, job.request_id, attempts);
-    } else {
-      // Release for next poll cycle
-      await this.dataSource.query(
-        `UPDATE outbox_jobs
-         SET status = 'PENDING', lease_until = NULL,
-             next_attempt_at = NOW() + make_interval(secs => $1 / 1000.0),
-             updated_at = NOW()
-         WHERE id = $2`,
-        [retryDelay, job.id],
-      );
-    }
+    console.log(`[worker] job ${job.id} attempt ${attempts}/3, retry in ${retryDelay}ms`);
   }
 
   private async safePost(job: any): Promise<any> {
@@ -242,7 +232,4 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private sleep(ms: number) {
-    return new Promise<void>((r) => setTimeout(r, ms));
-  }
 }

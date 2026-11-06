@@ -110,30 +110,85 @@ npm run dev            # Vite на порту 5173
 
 ## Обработка неопределённого ответа провайдера
 
-1. POST `/renewals` с `Idempotency-Key` → первый вызов возвращает 503 (операция сохранена)
-2. Воркер сохраняет attempt_count++ в БД (crash-safe)
-3. Ждёт `PROVIDER_RETRY_DELAY_MS` мс (env, по умолчанию 5000)
-4. GET `/renewals/{encodeURIComponent(key)}` — если `status=completed` → COMPLETED
-5. Если нет — повторяет POST с тем же ключом
-6. После 3 POST без подтверждения → NEEDS_ATTENTION
-7. GET не считается в счётчик попыток
+Воркер не использует `sleep()`. Задержка хранится в БД в поле `outbox_jobs.next_attempt_at`.
+
+Цикл попытки:
+1. POST `/renewals` с `Idempotency-Key` → первый вызов возвращает 503 (операция сохранена провайдером)
+2. Воркер обновляет outbox_job: `attempt_count++`, `status=PENDING`, `next_attempt_at=NOW()+PROVIDER_RETRY_DELAY_MS`, `lease_until=NULL` — и завершает тик
+3. По истечении `next_attempt_at` следующий тик подхватывает job
+4. `attempt_count > 0` → сначала GET `/renewals/{key}` — если `status=completed` → COMPLETED
+5. Если GET вернул 404 — повторный POST с тем же ключом
+6. После 3 POST без подтверждения через GET → NEEDS_ATTENTION
+
+Преимущество перед `sleep` внутри тика: воркер не блокируется; при краше между шагами 1 и 2 job остаётся в PROCESSING с `lease_until`, и другой экземпляр подхватит его после 60 секунд.
 
 ### Как воспроизвести сценарий с рестартом
 
 ```bash
-# При одобренной заявке в PROCESSING
-# 1. Убить бэкенд (Ctrl+C)
-# 2. Дождаться, пока lease_until < NOW() (60 секунд)
-# 3. Запустить бэкенд снова — воркер найдёт PROCESSING-задачу с истёкшим lease
-# 4. attempt_count > 0 → воркер сначала делает GET /renewals/{key}
-# 5. Если провайдер уже обработал → COMPLETED; иначе новый POST с тем же ключом
+# 1. Запустить симулятор и бэкенд с увеличенной задержкой:
+python provider/provider_simulator.py &
+PROVIDER_RETRY_DELAY_MS=15000 npm run start:dev
 
-# Проверить у провайдера:
-# GET http://127.0.0.1:8091/renewals/<encodeURIComponent(idempotency_key)>
-# Возвращает {status:"completed", started_count:1, ...}
+# 2. Создать и одобрить заявку (через UI или curl ниже)
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"initiator-alpha","password":"initiator-alpha"}' | \
+  node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).access_token))")
+
+REQ=$(curl -s -X POST http://localhost:3000/renewal-requests \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"resourceId":"res-a-01"}')
+RID=$(echo $REQ | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).id))")
+IKEY=$(echo $REQ | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).idempotencyKey))")
+
+ATOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"approver-alpha","password":"approver-alpha"}' | \
+  node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).access_token))")
+curl -s -X POST "http://localhost:3000/renewal-requests/$RID/approve" \
+  -H "Authorization: Bearer $ATOKEN"
+
+# 3. Через 5-7 секунд воркер сделал POST→503 и выпустил job обратно в PENDING
+#    (attempt_count=1, next_attempt_at=NOW()+15s, lease_until=NULL)
+sleep 7
+# Убить бэкенд (Ctrl+C или kill)
+
+# 4. Запустить бэкенд снова:
+PROVIDER_RETRY_DELAY_MS=15000 npm run start:dev
+# Воркер найдёт PENDING-job, дождётся next_attempt_at (~8 секунд),
+# сделает GET /renewals/{key} → {status:"completed"} → COMPLETED
+
+# 5. Проверить у провайдера (started_count=1 → второго POST не было):
+curl http://127.0.0.1:8091/renewals/$(node -e "process.stdout.write(encodeURIComponent('$IKEY'))")
+# → {"operation_id":"...","status":"completed","started_count":1,"resource_id":"res-a-01",...}
+
+# 6. Статистика:
+curl -s http://localhost:3000/stats?resource_id=res-a-01 -H "Authorization: Bearer $TOKEN"
+# → {"operation_count":1}
+curl -s http://localhost:3000/stats?resource_id=res-b-01 -H "Authorization: Bearer $TOKEN"
+# → {"operation_count":0}
 ```
 
-Значение `idempotency_key` берётся из поля в таблице `renewal_requests`.
+**Значение `idempotency_key`** берётся из поля `idempotencyKey` в ответе на POST /renewal-requests.
+
+### Результат контрольного прогона (06.11.2026)
+
+```
+approve → PROCESSING
+t+7s:   KILL backend
+        outbox_job: status=PENDING, attempt_count=1,
+                    next_attempt_at ≈ approve_time+15s, lease_until=NULL
+restart → worker ждёт next_attempt_at → GET /renewals/{key}
+t+2s:   COMPLETED  (started_count=1 у симулятора — повторного POST не было)
+
+GET /renewals/a78c60a4-ced8-4544-8a16-439ca17ceb95:
+  {"operation_id":"7b8c2a75-...","status":"completed","started_count":1,"resource_id":"res-a-01"}
+
+GET /stats?resource_id=res-a-01  → {"operation_count":1}
+GET /stats?resource_id=res-b-01  → {"operation_count":0}
+res-a-01 expiryDate: 2027-04-30  (обновлён с 2027-03-31)
+```
 
 ---
 
@@ -151,18 +206,28 @@ npm run dev            # Vite на порту 5173
 
 ## Запуск тестов
 
+### Интеграционные (20 тестов, fake provider)
+
 ```bash
 cd backend
-# Убедиться, что PostgreSQL запущен с renewals_test БД
-# Тесты сами накатывают миграции и делают seed
-
+# PostgreSQL на :5433 с БД renewals_test обязателен
 npm test
 ```
 
-Тесты используют:
-- Порт 5433 (тестовая PostgreSQL)
-- Порт 8092 (fake HTTP-сервер провайдера)
-- `PROVIDER_RETRY_DELAY_MS=200` (для быстрых тестов)
+Используют: PostgreSQL :5433/renewals_test, fake HTTP-провайдер на :8092, `PROVIDER_RETRY_DELAY_MS=200`.
+
+### E2E против реального симулятора (4 теста)
+
+```bash
+# 1. Запустить симулятор:
+python provider/provider_simulator.py
+
+# 2. В другом терминале:
+cd backend
+npx jest --testPathPattern e2e-real-provider --runInBand
+```
+
+E2E-тесты проверяют: health, POST→503→GET→completed, конфликт ключей идемпотентности, полный flow create→approve→COMPLETED с проверкой даты ресурса и статистики симулятора.
 
 ---
 
@@ -170,6 +235,7 @@ npm test
 
 - **Нет регистрации, SSO, уведомлений, брокера** — по условию задания
 - **Воркер однопоточный** — `busy` флаг предотвращает параллельный запуск тиков в одном процессе; для масштабирования `SELECT FOR UPDATE SKIP LOCKED` обеспечивает безопасность при нескольких инстансах
+- **Нет `sleep` в воркере** — задержка между попытками хранится в `outbox_jobs.next_attempt_at`; воркер не блокируется; crash recovery при убитом процессе занимает время до следующего `next_attempt_at` плюс lease timeout (60s) как крайний случай
 - **Polling вместо WebSocket** — фронтенд опрашивает каждые 5 секунд
-- **Lease timeout = 60s** — при краше задача подхватывается через минуту
+- **Lease timeout = 60s** — если процесс убит в момент обращения к провайдеру (до освобождения job обратно в PENDING), задача подхватится через 60 секунд
 - **Пароли = логин** — только для seed/тестов; в README задокументировано
