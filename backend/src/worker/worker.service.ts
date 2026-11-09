@@ -172,7 +172,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       if (updated[0]?.length > 0) {
         const { resource_id, new_date } = updated[0][0];
         await qr.query(
-          `UPDATE resources SET expiry_date = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE resources SET expiry_date = $1, version = version + 1, updated_at = NOW() WHERE id = $2`,
           [new_date, resource_id],
         );
 

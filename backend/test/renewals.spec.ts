@@ -528,7 +528,7 @@ describe('Worker & Provider', () => {
 
 // ---- History ----
 describe('History', () => {
-  it('history endpoint requires workspace access', async () => {
+  it('history endpoint requires workspace access → 403 for other workspace', async () => {
     const initiatorToken = await getToken('initiator-alpha');
     const created = await request(app.getHttpServer())
       .post('/renewal-requests')
@@ -541,6 +541,123 @@ describe('History', () => {
       .get(`/renewal-requests/${rid}/history`)
       .set('Authorization', `Bearer ${betaToken}`);
     expect(res.status).toBe(403);
+  });
+
+  it('actorUsername: create/approve have usernames; worker COMPLETED has null', async () => {
+    const initiatorToken = await getToken('initiator-alpha');
+    const approverToken = await getToken('approver-alpha');
+
+    const created = await request(app.getHttpServer())
+      .post('/renewal-requests')
+      .set('Authorization', `Bearer ${initiatorToken}`)
+      .send({ resourceId: 'res-a-01' });
+    const requestId = created.body.id;
+
+    await request(app.getHttpServer())
+      .post(`/renewal-requests/${requestId}/approve`)
+      .set('Authorization', `Bearer ${approverToken}`);
+
+    await waitFor(async () => {
+      const r = await request(app.getHttpServer())
+        .get('/renewal-requests')
+        .set('Authorization', `Bearer ${initiatorToken}`);
+      return r.body.find((x: any) => x.id === requestId)?.status === 'COMPLETED';
+    }, 15000);
+
+    const histRes = await request(app.getHttpServer())
+      .get(`/renewal-requests/${requestId}/history`)
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    expect(histRes.status).toBe(200);
+    const hist: any[] = histRes.body;
+
+    // create entry: null→PENDING, actor = initiator
+    const createEntry = hist.find((h) => h.fromStatus === null && h.toStatus === 'PENDING');
+    expect(createEntry).toBeDefined();
+    expect(createEntry.actorUsername).toBe('initiator-alpha');
+
+    // approve entry: PENDING→PROCESSING, actor = approver
+    const approveEntry = hist.find((h) => h.fromStatus === 'PENDING' && h.toStatus === 'PROCESSING');
+    expect(approveEntry).toBeDefined();
+    expect(approveEntry.actorUsername).toBe('approver-alpha');
+
+    // worker COMPLETED entry: PROCESSING→COMPLETED, actor = null (система)
+    const completedEntry = hist.find((h) => h.fromStatus === 'PROCESSING' && h.toStatus === 'COMPLETED');
+    expect(completedEntry).toBeDefined();
+    expect(completedEntry.actorUsername).toBeNull();
+  });
+
+  it('actorUsername: reject has username; retry has username + comment', async () => {
+    const initiatorToken = await getToken('initiator-alpha');
+    const approverToken = await getToken('approver-alpha');
+
+    // Create and reject
+    const created = await request(app.getHttpServer())
+      .post('/renewal-requests')
+      .set('Authorization', `Bearer ${initiatorToken}`)
+      .send({ resourceId: 'res-a-01' });
+    const requestId = created.body.id;
+
+    await request(app.getHttpServer())
+      .post(`/renewal-requests/${requestId}/reject`)
+      .set('Authorization', `Bearer ${approverToken}`)
+      .send({ comment: 'test rejection' });
+
+    const histRes = await request(app.getHttpServer())
+      .get(`/renewal-requests/${requestId}/history`)
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    const hist: any[] = histRes.body;
+
+    const rejectEntry = hist.find((h) => h.toStatus === 'REJECTED');
+    expect(rejectEntry).toBeDefined();
+    expect(rejectEntry.actorUsername).toBe('approver-alpha');
+    expect(rejectEntry.comment).toBe('test rejection');
+  });
+
+  it('actorUsername: NEEDS_ATTENTION has null actor; retry has username + comment', async () => {
+    fakeProvider.failAll(100);
+    const initiatorToken = await getToken('initiator-alpha');
+    const approverToken = await getToken('approver-alpha');
+
+    const created = await request(app.getHttpServer())
+      .post('/renewal-requests')
+      .set('Authorization', `Bearer ${initiatorToken}`)
+      .send({ resourceId: 'res-a-01' });
+    const requestId = created.body.id;
+
+    await request(app.getHttpServer())
+      .post(`/renewal-requests/${requestId}/approve`)
+      .set('Authorization', `Bearer ${approverToken}`);
+
+    await waitFor(async () => {
+      const r = await request(app.getHttpServer())
+        .get('/renewal-requests')
+        .set('Authorization', `Bearer ${initiatorToken}`);
+      return r.body.find((x: any) => x.id === requestId)?.status === 'NEEDS_ATTENTION';
+    }, 15000);
+
+    // Check NEEDS_ATTENTION entry has null actorUsername
+    const histBefore = await request(app.getHttpServer())
+      .get(`/renewal-requests/${requestId}/history`)
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    const naEntry = histBefore.body.find((h: any) => h.toStatus === 'NEEDS_ATTENTION');
+    expect(naEntry).toBeDefined();
+    expect(naEntry.actorUsername).toBeNull();
+
+    // Retry
+    fakeProvider.reset();
+    await request(app.getHttpServer())
+      .post(`/renewal-requests/${requestId}/retry`)
+      .set('Authorization', `Bearer ${approverToken}`);
+
+    const histAfter = await request(app.getHttpServer())
+      .get(`/renewal-requests/${requestId}/history`)
+      .set('Authorization', `Bearer ${initiatorToken}`);
+    const retryEntry = histAfter.body.find(
+      (h: any) => h.fromStatus === 'NEEDS_ATTENTION' && h.toStatus === 'PROCESSING',
+    );
+    expect(retryEntry).toBeDefined();
+    expect(retryEntry.actorUsername).toBe('approver-alpha');
+    expect(retryEntry.comment).toBe('Повтор по запросу согласующего');
   });
 });
 
