@@ -238,8 +238,8 @@ export class RenewalRequestsService {
       );
 
       await qr.query(
-        `INSERT INTO request_history (id, request_id, actor_id, from_status, to_status, created_at)
-         VALUES (gen_random_uuid(), $1, $2, 'NEEDS_ATTENTION', 'PROCESSING', NOW())`,
+        `INSERT INTO request_history (id, request_id, actor_id, from_status, to_status, comment, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'NEEDS_ATTENTION', 'PROCESSING', 'Повтор по запросу согласующего', NOW())`,
         [id, user.id],
       );
 
@@ -258,10 +258,26 @@ export class RenewalRequestsService {
     if (!req || req.workspaceId !== user.workspaceId) {
       throw new ForbiddenException('Request not found or access denied');
     }
-    return this.historyRepo.find({
-      where: { requestId: id },
-      order: { createdAt: 'ASC' },
-    });
+    const rows = await this.dataSource.query(
+      `SELECT rh.id, rh.request_id, rh.actor_id,
+              u.username AS actor_username,
+              rh.from_status, rh.to_status, rh.comment, rh.created_at
+       FROM request_history rh
+       LEFT JOIN users u ON u.id = rh.actor_id
+       WHERE rh.request_id = $1
+       ORDER BY rh.created_at ASC`,
+      [id],
+    );
+    return rows.map((r: any) => ({
+      id: r.id,
+      requestId: r.request_id,
+      actorId: r.actor_id,
+      actorUsername: r.actor_username ?? null,
+      fromStatus: r.from_status,
+      toStatus: r.to_status,
+      comment: r.comment,
+      createdAt: r.created_at,
+    }));
   }
 
   async getStats(resourceId: string, user: User) {

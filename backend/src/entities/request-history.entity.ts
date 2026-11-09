@@ -8,8 +8,8 @@ export class RequestHistory {
   @Column({ name: 'request_id' })
   requestId: string;
 
-  @Column({ name: 'actor_id' })
-  actorId: string;
+  @Column({ name: 'actor_id', type: 'uuid', nullable: true })
+  actorId: string | null;
 
   @Column({ name: 'from_status', type: 'varchar', length: 50, nullable: true })
   fromStatus: string;

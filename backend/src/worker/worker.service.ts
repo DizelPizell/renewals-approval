@@ -179,8 +179,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         await qr.query(
           `INSERT INTO request_history
              (id, request_id, actor_id, from_status, to_status, created_at)
-           SELECT gen_random_uuid(), $1, created_by_id, 'PROCESSING', 'COMPLETED', NOW()
-           FROM renewal_requests WHERE id = $1`,
+           VALUES (gen_random_uuid(), $1, NULL, 'PROCESSING', 'COMPLETED', NOW())`,
           [job.request_id],
         );
       }
@@ -215,10 +214,9 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       await qr.query(
         `INSERT INTO request_history
            (id, request_id, actor_id, from_status, to_status, comment, created_at)
-         SELECT gen_random_uuid(), $1, created_by_id,
-                'PROCESSING', 'NEEDS_ATTENTION',
-                'Provider unreachable after 3 attempts', NOW()
-         FROM renewal_requests WHERE id = $1`,
+         VALUES (gen_random_uuid(), $1, NULL,
+                 'PROCESSING', 'NEEDS_ATTENTION',
+                 'Provider unreachable after 3 attempts', NOW())`,
         [requestId],
       );
 

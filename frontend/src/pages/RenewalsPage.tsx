@@ -14,9 +14,22 @@ function formatMoney(minor: string, currency: string) {
   );
 }
 
-function formatDate(d: string) {
+// String-only date formatter — no new Date(), timezone-safe
+function formatDate(d: string): string {
   if (!d) return '—';
-  return d.substring(0, 10);
+  const s = d.substring(0, 10);
+  const [y, m, day] = s.split('-');
+  if (!y || !m || !day) return s;
+  return `${day}.${m}.${y}`;
+}
+
+// Timestamp formatter: extracts date/time from ISO string without new Date()
+function formatDateTime(iso: string): string {
+  if (!iso) return '—';
+  const date = iso.substring(0, 10); // YYYY-MM-DD
+  const time = iso.substring(11, 16); // HH:mm
+  const [y, m, d] = date.split('-');
+  return `${d}.${m}.${y}, ${time}`;
 }
 
 function getUser(): User | null {
@@ -36,9 +49,8 @@ export default function RenewalsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Modal states
   const [createModal, setCreateModal] = useState(false);
-  const [historyModal, setHistoryModal] = useState<string | null>(null); // request id
+  const [historyModal, setHistoryModal] = useState<string | null>(null);
   const [rejectModal, setRejectModal] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
   const [creating, setCreating] = useState(false);
@@ -46,7 +58,7 @@ export default function RenewalsPage() {
   const [rejectComment, setRejectComment] = useState('');
   const [history, setHistory] = useState<RequestHistory[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 600);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 480);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -75,7 +87,7 @@ export default function RenewalsPage() {
   }, [load]);
 
   useEffect(() => {
-    const handler = () => setIsMobile(window.innerWidth <= 600);
+    const handler = () => setIsMobile(window.innerWidth <= 480);
     window.addEventListener('resize', handler);
     return () => window.removeEventListener('resize', handler);
   }, []);
@@ -91,11 +103,9 @@ export default function RenewalsPage() {
 
   const totalCount = requests.length;
   const pendingCount = requests.filter((r) => r.status === 'PENDING').length;
-  const processingCount = requests.filter(
-    (r) => r.status === 'PROCESSING' || r.status === 'NEEDS_ATTENTION',
-  ).length;
+  const processingCount = requests.filter((r) => r.status === 'PROCESSING').length;
+  const needsAttentionCount = requests.filter((r) => r.status === 'NEEDS_ATTENTION').length;
 
-  // resource map
   const resourceMap = Object.fromEntries(resources.map((r) => [r.id, r]));
 
   async function handleCreate() {
@@ -195,70 +205,75 @@ export default function RenewalsPage() {
     );
   }
 
-  const workspaceLabel = user?.workspaceId === 'alpha' ? 'Alpha' : user?.workspaceId === 'beta' ? 'Beta' : user?.workspaceId;
+  const workspaceLabel =
+    user?.workspaceId === 'alpha' ? 'Alpha' :
+    user?.workspaceId === 'beta' ? 'Beta' :
+    user?.workspaceId;
+
+  // UTC-safe +30 days preview in create modal
+  function computeNewDate(expiryDate: string): string {
+    const [y, m, d] = expiryDate.substring(0, 10).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d + 30)).toISOString().substring(0, 10);
+  }
 
   return (
-    <div style={{ paddingBottom: 48 }}>
-      {/* Header */}
-      <div style={{ background: 'var(--card)', borderBottom: '1px solid rgba(169,184,185,0.1)', marginBottom: 32 }}>
-        <div className="container" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '20px 0' }}>
-          <div>
-            <h1 style={{ fontSize: 20, fontWeight: 700 }}>Заявки на продление</h1>
-            <span style={{ fontSize: 13, color: 'var(--secondary)' }}>
-              Рабочее пространство: <strong style={{ color: 'var(--accent)' }}>{workspaceLabel}</strong>
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 13, color: 'var(--secondary)' }}>{user?.username}</span>
-            <button className="btn-secondary" onClick={logout} style={{ fontSize: 13, padding: '6px 14px' }}>
-              Выйти
-            </button>
-          </div>
-        </div>
+    <div style={{ minHeight: '100vh', paddingBottom: 48 }}>
+      {/* Top bar: username + logout */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '16px 32px', gap: 12, alignItems: 'center' }}>
+        <span style={{ fontSize: 13, color: 'var(--secondary)' }}>{user?.username}</span>
+        <button
+          className="btn-secondary"
+          onClick={logout}
+          style={{ fontSize: 13, padding: '6px 14px' }}
+        >
+          Выйти
+        </button>
       </div>
 
       <div className="container">
-        {/* Stats */}
-        <div style={{ display: 'flex', gap: 16, marginBottom: 32, flexWrap: 'wrap' }}>
-          {[
-            { label: 'Всего', value: totalCount, color: 'var(--text)' },
-            { label: 'Ожидают', value: pendingCount, color: 'var(--accent)' },
-            { label: 'Выполняется', value: processingCount, color: 'var(--yellow)' },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="card" style={{ flex: '1 1 140px', textAlign: 'center' }}>
-              <div style={{ fontSize: 32, fontWeight: 700, color }}>{value}</div>
-              <div style={{ fontSize: 13, color: 'var(--secondary)', marginTop: 4 }}>{label}</div>
-            </div>
-          ))}
+        {/* Page heading */}
+        <div style={{ marginBottom: 32 }}>
+          <h1 style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.2 }}>Заявки на продление</h1>
+          <p style={{ fontSize: 14, color: 'var(--secondary)', marginTop: 6 }}>
+            Рабочее пространство: {workspaceLabel}
+          </p>
         </div>
 
-        {/* Table header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Ресурсы и заявки</h2>
-          {canCreate && (
-            <button
-              className="btn-primary"
-              onClick={() => { setCreateModal(true); setCreateResourceId(''); setActionError(''); }}
-            >
-              + Создать заявку
-            </button>
-          )}
-        </div>
+        {error && <div className="error-banner" style={{ marginBottom: 16 }}>{error}</div>}
 
-        {loading && (
-          <div style={{ textAlign: 'center', color: 'var(--secondary)', padding: 32 }}>Загрузка...</div>
-        )}
-        {error && <div className="error-banner">{error}</div>}
+        {/* Main card */}
+        <div className="card">
+          {/* Counters row */}
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'baseline', marginBottom: 20 }}>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>
+              Всего: {totalCount}
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--accent)' }}>
+              Ожидают: {pendingCount}
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--yellow)' }}>
+              Выполняется: {processingCount}
+            </span>
+            {needsAttentionCount > 0 && (
+              <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--red)' }}>
+                Требует внимания: {needsAttentionCount}
+              </span>
+            )}
+          </div>
 
-        {!loading && !isMobile && (
-          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          <div style={{ borderTop: '1px solid rgba(169,184,185,0.12)', marginBottom: 0 }} />
+
+          {/* Table / cards */}
+          {loading ? (
+            <div style={{ textAlign: 'center', color: 'var(--secondary)', padding: 32 }}>Загрузка...</div>
+          ) : !isMobile ? (
             <table className="data-table">
               <thead>
                 <tr>
                   <th>Ресурс</th>
                   <th>Срок</th>
                   <th>Стоимость</th>
-                  <th>Статус заявки</th>
+                  <th>Статус</th>
                   <th>Действия</th>
                 </tr>
               </thead>
@@ -296,82 +311,67 @@ export default function RenewalsPage() {
                 )}
               </tbody>
             </table>
-          </div>
-        )}
+          ) : (
+            /* Mobile cards */
+            <div style={{ paddingTop: 8 }}>
+              {resources.map((res) => {
+                const activeReq = requests.find(
+                  (r) => r.resourceId === res.id && ['PENDING', 'PROCESSING', 'NEEDS_ATTENTION'].includes(r.status),
+                );
+                const latestReq = requests.find((r) => r.resourceId === res.id);
+                const displayReq = activeReq || latestReq;
 
-        {/* Mobile cards */}
-        {!loading && isMobile && (
-          <div>
-            {resources.map((res) => {
-              const activeReq = requests.find(
-                (r) => r.resourceId === res.id && ['PENDING', 'PROCESSING', 'NEEDS_ATTENTION'].includes(r.status),
-              );
-              const latestReq = requests.find((r) => r.resourceId === res.id);
-              const displayReq = activeReq || latestReq;
-
-              return (
-                <div key={res.id} className="mobile-card">
-                  <div className="mobile-card-row">
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 15 }}>{res.name}</div>
-                      <div style={{ color: 'var(--secondary)', fontSize: 12 }}>{res.id}</div>
+                return (
+                  <div key={res.id} className="mobile-card">
+                    <div className="mobile-card-row">
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 15 }}>{res.name}</div>
+                        <div style={{ color: 'var(--secondary)', fontSize: 12 }}>{res.id}</div>
+                      </div>
+                      {displayReq && <StatusBadge status={displayReq.status} />}
                     </div>
-                    {displayReq && <StatusBadge status={displayReq.status} />}
+                    <div className="mobile-card-row">
+                      <span className="mobile-card-label">Срок</span>
+                      <span style={{ fontSize: 14 }}>{formatDate(res.expiryDate)}</span>
+                    </div>
+                    <div className="mobile-card-row">
+                      <span className="mobile-card-label">Стоимость</span>
+                      <span style={{ fontSize: 14 }}>{formatMoney(res.amountMinor, res.currency)}</span>
+                    </div>
+                    {displayReq && (
+                      <div style={{ marginTop: 8 }}>{renderActions(displayReq)}</div>
+                    )}
                   </div>
-                  <div className="mobile-card-row">
-                    <span className="mobile-card-label">Срок</span>
-                    <span style={{ fontSize: 14 }}>{formatDate(res.expiryDate)}</span>
-                  </div>
-                  <div className="mobile-card-row">
-                    <span className="mobile-card-label">Стоимость</span>
-                    <span style={{ fontSize: 14 }}>{formatMoney(res.amountMinor, res.currency)}</span>
-                  </div>
-                  {displayReq && (
-                    <div style={{ marginTop: 8 }}>{renderActions(displayReq)}</div>
-                  )}
+                );
+              })}
+              {resources.length === 0 && (
+                <div style={{ textAlign: 'center', color: 'var(--secondary)', padding: 24 }}>
+                  Нет ресурсов
                 </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* All requests list (below resources) */}
-        {!loading && requests.length > 0 && (
-          <div style={{ marginTop: 32 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>Все заявки</h2>
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Ресурс</th>
-                    <th>Новый срок</th>
-                    <th className="hide-mobile">Создана</th>
-                    <th>Статус</th>
-                    <th>Действия</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.map((req) => (
-                    <tr key={req.id}>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>{resourceMap[req.resourceId]?.name || req.resourceId}</div>
-                        <div style={{ fontSize: 12, color: 'var(--secondary)' }}>
-                          {req.oldDate} → {req.newDate}
-                        </div>
-                      </td>
-                      <td>{formatDate(req.newDate)}</td>
-                      <td className="hide-mobile" style={{ color: 'var(--secondary)', fontSize: 13 }}>
-                        {new Date(req.createdAt).toLocaleDateString('ru-RU')}
-                      </td>
-                      <td><StatusBadge status={req.status} /></td>
-                      <td>{renderActions(req)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              )}
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Footer divider + create button */}
+          {!loading && (
+            <>
+              <div style={{ borderTop: '1px solid rgba(169,184,185,0.12)', margin: '8px 0 20px' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
+                {canCreate && (
+                  <button
+                    className="btn-create-pill"
+                    onClick={() => { setCreateModal(true); setCreateResourceId(''); setActionError(''); }}
+                  >
+                    Создать заявку
+                  </button>
+                )}
+                <span style={{ fontSize: 13, color: 'var(--secondary)' }}>
+                  Данные обновляются каждые 5 секунд
+                </span>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Create request modal */}
@@ -387,17 +387,6 @@ export default function RenewalsPage() {
             <select
               value={createResourceId}
               onChange={(e) => setCreateResourceId(e.target.value)}
-              style={{
-                width: '100%',
-                background: 'var(--bg)',
-                border: '1px solid var(--secondary)',
-                borderRadius: 8,
-                color: 'var(--text)',
-                padding: '10px 14px',
-                fontSize: 15,
-                outline: 'none',
-                fontFamily: 'var(--font)',
-              }}
               autoFocus
             >
               <option value="">Выберите ресурс...</option>
@@ -412,9 +401,7 @@ export default function RenewalsPage() {
           {createResourceId && (() => {
             const res = resourceMap[createResourceId];
             if (!res) return null;
-            const d = new Date(res.expiryDate);
-            d.setDate(d.getDate() + 30);
-            const newDate = d.toISOString().substring(0, 10);
+            const newDate = computeNewDate(res.expiryDate);
             return (
               <div
                 style={{
@@ -426,7 +413,7 @@ export default function RenewalsPage() {
                 }}
               >
                 <div>Текущий срок: <strong>{formatDate(res.expiryDate)}</strong></div>
-                <div>Новый срок: <strong style={{ color: 'var(--accent)' }}>{newDate}</strong></div>
+                <div>Новый срок: <strong style={{ color: 'var(--accent)' }}>{formatDate(newDate)}</strong></div>
                 <div>Стоимость: <strong>{formatMoney(res.amountMinor, res.currency)}</strong></div>
               </div>
             );
@@ -461,19 +448,7 @@ export default function RenewalsPage() {
               value={rejectComment}
               onChange={(e) => setRejectComment(e.target.value)}
               autoFocus
-              style={{
-                width: '100%',
-                background: 'var(--bg)',
-                border: '1px solid var(--secondary)',
-                borderRadius: 8,
-                color: 'var(--text)',
-                padding: '10px 14px',
-                fontSize: 14,
-                fontFamily: 'var(--font)',
-                resize: 'vertical',
-                minHeight: 80,
-                outline: 'none',
-              }}
+              style={{ resize: 'vertical', minHeight: 80 }}
             />
           </label>
           {actionError && <div className="error-banner">{actionError}</div>}
@@ -512,13 +487,16 @@ export default function RenewalsPage() {
                     {h.fromStatus && <span style={{ color: 'var(--secondary)', fontSize: 12 }}>→</span>}
                     <StatusBadge status={h.toStatus as any} />
                   </div>
+                  <div style={{ fontSize: 13, color: 'var(--secondary)', marginTop: 4 }}>
+                    {h.actorUsername ?? 'система'}
+                  </div>
                   {h.comment && (
-                    <div style={{ fontSize: 13, color: 'var(--secondary)', marginTop: 4 }}>
+                    <div style={{ fontSize: 13, color: 'var(--secondary)', marginTop: 2, fontStyle: 'italic' }}>
                       {h.comment}
                     </div>
                   )}
                   <div style={{ fontSize: 11, color: 'var(--secondary)', marginTop: 4 }}>
-                    {new Date(h.createdAt).toLocaleString('ru-RU')}
+                    {formatDateTime(h.createdAt)}
                   </div>
                 </div>
               ))}

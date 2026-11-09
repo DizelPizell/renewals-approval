@@ -41,7 +41,8 @@ export interface RenewalRequest {
 export interface RequestHistory {
   id: string;
   requestId: string;
-  actorId: string;
+  actorId: string | null;
+  actorUsername: string | null;
   fromStatus: string | null;
   toStatus: string;
   comment: string | null;
